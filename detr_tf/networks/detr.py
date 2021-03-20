@@ -17,7 +17,7 @@ from .weights import load_weights
 
 
 class DETR(tf.keras.Model):
-    def __init__(self, num_classes=92, num_queries=100,
+    def __init__(self, num_classes=92, num_queries=200,
                  backbone=None,
                  pos_encoder=None,
                  transformer=None,
@@ -39,7 +39,7 @@ class DETR(tf.keras.Model):
         self.model_dim = self.transformer.model_dim
 
         self.pos_encoder = pos_encoder or PositionEmbeddingSine(
-            num_pos_features=self.model_dim // 2, normalize=True)
+            num_pos_features=self.model_dim // 2, normalize=True, name="position_embedding_sine")
 
         self.input_proj = tf.keras.layers.Conv2D(self.model_dim, kernel_size=1, name='input_proj')
 
@@ -51,7 +51,7 @@ class DETR(tf.keras.Model):
         self.bbox_embed_linear1 = Linear(self.model_dim, name='bbox_embed_0')
         self.bbox_embed_linear2 = Linear(self.model_dim, name='bbox_embed_1')
         self.bbox_embed_linear3 = Linear(4, name='bbox_embed_2')
-        self.activation = tf.keras.layers.ReLU()
+        self.activation = tf.keras.layers.ReLU(name="re_lu")
 
 
     def downsample_masks(self, masks, x):
@@ -62,24 +62,26 @@ class DETR(tf.keras.Model):
         masks = tf.cast(masks, tf.bool)
         return masks
 
-    def call(self, inp, training=False, post_process=False):
-        x, masks = inp
-        x = self.backbone(x, training=training)
-        masks = self.downsample_masks(masks, x)
+    def call(self, x, training=False, post_process=False):
+
+        x = self.backbone(x, training=training) # [bs, featuremap_h, featuremap_w, n_channels]
+        masks = tf.zeros((tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2]), tf.bool)
 
         pos_encoding = self.pos_encoder(masks)
 
         hs = self.transformer(self.input_proj(x), masks, self.query_embed(None),
-                              pos_encoding, training=training)[0]
+                              pos_encoding, training=training)[0] # [n_dec_layers, bs, num_queries, model_dim]
 
-        outputs_class = self.class_embed(hs)
+        outputs_class = self.class_embed(hs) # [n_dec_layers, bs, bs, num_queries, n_classes]
 
         box_ftmps = self.activation(self.bbox_embed_linear1(hs))
         box_ftmps = self.activation(self.bbox_embed_linear2(box_ftmps))
-        outputs_coord = tf.sigmoid(self.bbox_embed_linear3(box_ftmps))
+        outputs_coord = tf.sigmoid(self.bbox_embed_linear3(box_ftmps)) # [n_dec_layers, bs, num_queries, 4]
 
-        output = {'pred_logits': outputs_class[-1],
-                  'pred_boxes': outputs_coord[-1]}
+        output = {
+            'pred_logits': outputs_class[-1], # -1 - result from last decoding layer.
+            'pred_boxes': outputs_coord[-1],
+            }
 
         if post_process:
             output = self.post_process(output)
@@ -88,11 +90,11 @@ class DETR(tf.keras.Model):
 
     def build(self, input_shape=None, **kwargs):
         if input_shape is None:
-            input_shape = [(None, None, None, 3), (None, None, None)]
+            input_shape = (None, None, None, 1)
         super().build(input_shape, **kwargs)
 
 def add_heads_nlayers(config, detr, nb_class):
-    image_input = tf.keras.Input((None, None, 3))
+    image_input = tf.keras.Input((None, None, 1))
     # Setup the new layers
     cls_layer = tf.keras.layers.Dense(nb_class, name="cls_layer")
     pos_layer = tf.keras.models.Sequential([
@@ -138,14 +140,14 @@ def get_detr_model(config, include_top=False, nb_class=None, weights=None, tf_ba
     if weights is not None:
         load_weights(detr, weights)
 
-    image_input = tf.keras.Input((None, None, 3))
+    image_input = tf.keras.Input((None, None, 1))
 
     # Backbone
     if not tf_backbone:
         backbone = detr.get_layer("backbone")
     else:
         config.normalized_method = "tf_resnet"
-        backbone = tf.keras.applications.ResNet50(include_top=False, weights="imagenet", input_shape=(None, None, 3))
+        backbone = tf.keras.applications.ResNet50(include_top=False, weights="imagenet", input_shape=(None, None, 1))
 
     # Transformer
     transformer = detr.get_layer("transformer")

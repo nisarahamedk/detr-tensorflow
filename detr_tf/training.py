@@ -6,7 +6,7 @@ from .loss.loss import get_losses
 import time
 import wandb
 
-@tf.function
+# @tf.function
 def run_train_step(model, images, t_bbox, t_class, optimizers, config):
 
     if config.target_batch is not None:
